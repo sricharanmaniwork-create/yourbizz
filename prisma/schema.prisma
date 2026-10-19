@@ -1,0 +1,357 @@
+// YourBizz — Form Builder SaaS
+// Multi-tenant schema (workspace-scoped). Mirrors the production Supabase
+// schema in /supabase/migrations/0001_initial.sql. SQLite is used for local
+// sandbox; Postgres in production. The shape is identical.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Auth (NextAuth.js + custom workspace model)
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  emailVerified DateTime?
+  image         String?
+  passwordHash  String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts         Account[]
+  sessions         Session[]
+  memberships      WorkspaceMember[]
+  ownedWorkspaces Workspace[]        @relation("WorkspaceOwner")
+  formsCreatedBy   Form[]            @relation("FormAuthor")
+  auditLogs        AuditLog[]
+  apiKeys          ApiKey[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ---------------------------------------------------------------------------
+// Workspaces (tenants)
+// ---------------------------------------------------------------------------
+
+model Workspace {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  name        String
+  ownerId     String
+  plan        String   @default("free") // free | pro | business | enterprise
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  owner       User              @relation("WorkspaceOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members     WorkspaceMember[]
+  forms       Form[]
+  auditLogs   AuditLog[]
+  apiKeys     ApiKey[]
+  usage       UsageCounter[]
+}
+
+model WorkspaceMember {
+  id          String   @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        String   @default("builder") // owner | admin | builder | reviewer | viewer
+  invitedBy   String?
+  acceptedAt  DateTime?
+  createdAt   DateTime @default(now())
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Forms
+// ---------------------------------------------------------------------------
+
+model Form {
+  id            String   @id @default(cuid())
+  workspaceId   String
+  createdById   String
+  name          String
+  slug          String
+  description   String?
+  // schema_json: field definitions, layout, conditional logic, settings
+  schema        String   @default("{}")
+  status        String   @default("draft") // draft | published | archived
+  theme         String   @default("{}")
+  settings      String   @default("{}")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  workspace     Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy     User          @relation("FormAuthor", fields: [createdById], references: [id])
+  versions      FormVersion[]
+  share         FormShare?
+  submissions   Submission[]
+  workflows     Workflow[]
+  notifications Notification[]
+
+  @@unique([workspaceId, slug])
+  @@index([workspaceId, updatedAt])
+}
+
+model FormVersion {
+  id        String   @id @default(cuid())
+  formId    String
+  version   Int
+  schema    String
+  createdById String
+  createdAt DateTime @default(now())
+
+  form      Form @relation(fields: [formId], references: [id], onDelete: Cascade)
+
+  @@unique([formId, version])
+}
+
+model FormShare {
+  id            String    @id @default(cuid())
+  formId        String    @unique
+  publicToken   String    @unique
+  customDomain  String?
+  password      String?
+  expiresAt     DateTime?
+  isClosed      Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+
+  form          Form @relation(fields: [formId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Submissions
+// ---------------------------------------------------------------------------
+
+model Submission {
+  id              String   @id @default(cuid())
+  formId          String
+  workspaceId     String
+  data            String   // JSON
+  submittedAt     DateTime @default(now())
+  ip              String?
+  userAgent       String?
+  isCompleted     Boolean  @default(true)
+  completionTimeMs Int?
+  fingerprint     String?
+
+  form            Form @relation(fields: [formId], references: [id], onDelete: Cascade)
+  files           SubmissionFile[]
+  tags            SubmissionTag[]
+
+  @@index([formId, submittedAt])
+  @@index([workspaceId, submittedAt])
+}
+
+model SubmissionFile {
+  id           String @id @default(cuid())
+  submissionId String
+  fieldKey     String
+  storagePath  String
+  filename     String
+  size         Int
+  mime         String
+
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@index([submissionId])
+}
+
+model SubmissionTag {
+  id           String @id @default(cuid())
+  submissionId String
+  tag          String
+
+  submission   Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@unique([submissionId, tag])
+}
+
+// ---------------------------------------------------------------------------
+// Analytics (view / start / submit / abandon)
+// ---------------------------------------------------------------------------
+
+model AnalyticsEvent {
+  id         String   @id @default(cuid())
+  formId     String
+  eventType  String   // view | start | submit | abandon
+  payload    String   @default("{}")
+  ip         String?
+  fingerprint String?
+  createdAt  DateTime @default(now())
+
+  @@index([formId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Templates
+// ---------------------------------------------------------------------------
+
+model Template {
+  id         String   @id @default(cuid())
+  category   String
+  name       String
+  description String?
+  schema     String
+  isPublic   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  @@index([category])
+}
+
+// ---------------------------------------------------------------------------
+// Workflows (rules: trigger → condition → action)
+// ---------------------------------------------------------------------------
+
+model Workflow {
+  id           String   @id @default(cuid())
+  formId       String
+  name         String
+  trigger      String   @default("on_submit")
+  conditions   String   @default("[]")
+  actions      String   @default("[]")
+  enabled      Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  form         Form @relation(fields: [formId], references: [id], onDelete: Cascade)
+  runs         WorkflowRun[]
+
+  @@index([formId])
+}
+
+model WorkflowRun {
+  id         String    @id @default(cuid())
+  workflowId String
+  submissionId String?
+  status     String    @default("pending") // pending | success | failed
+  error      String?
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  workflow   Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@index([workflowId, startedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Notifications (email templates per form)
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id           String   @id @default(cuid())
+  formId       String
+  channel      String   @default("email") // email | webhook | sms
+  recipientTemplate String // "owner" | "{{field:email}}" | static address
+  subjectTemplate String
+  bodyTemplate String
+  trigger      String   @default("on_submit")
+  enabled      Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  form         Form @relation(fields: [formId], references: [id], onDelete: Cascade)
+
+  @@index([formId])
+}
+
+// ---------------------------------------------------------------------------
+// Audit log (workspace-scoped)
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  workspaceId String
+  actorId     String?
+  action      String
+  targetType  String
+  targetId    String?
+  meta        String   @default("{}")
+  createdAt   DateTime @default(now())
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  actor       User?     @relation(fields: [actorId], references: [id])
+
+  @@index([workspaceId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// API keys (workspace-scoped, hashed)
+// ---------------------------------------------------------------------------
+
+model ApiKey {
+  id          String    @id @default(cuid())
+  workspaceId String
+  name        String
+  hashedKey   String    @unique
+  prefix      String
+  scopes      String    @default("[]")
+  lastUsedAt  DateTime?
+  createdAt   DateTime  @default(now())
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdById String?
+  creator     User?     @relation(fields: [createdById], references: [id])
+
+  @@index([workspaceId])
+}
+
+// ---------------------------------------------------------------------------
+// Usage counters (quota metering: forms, submissions, storage, users)
+// ---------------------------------------------------------------------------
+
+model UsageCounter {
+  id          String   @id @default(cuid())
+  workspaceId String
+  metric      String   // forms | submissions | storage_bytes | users
+  period      String   // YYYY-MM or all-time
+  count       Int      @default(0)
+
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, metric, period])
+  @@index([workspaceId])
+}
