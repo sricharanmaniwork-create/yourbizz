@@ -50,3 +50,16 @@ server.log
 # Z.ai sandbox internals
 .zscripts/
 agent-ctx/
+
+# Local screenshots (don't bloat the repo)
+download/
+*.png
+*.jpg
+*.jpeg
+!public/**/*.png
+!public/**/*.jpg
+!public/**/*.jpeg
+
+# Local SQLite DB file
+db/*.db
+db/*.db-journal
